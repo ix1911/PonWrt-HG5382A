@@ -21,7 +21,7 @@ jobs:
         flavor: [with-nikki, no-nikki]
 
     steps:
-      - name: 簽出原始碼 (Checkout)
+      - name: 簽出工作流倉庫 (Checkout Workflow)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -58,7 +58,14 @@ jobs:
             subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
             libzstd-dev jq dos2unix upx-ucl
 
+      - name: 拉取 PonWrt 官方源碼 (Clone PonWrt)
+        run: |
+          git clone --depth 1 https://github.com/pbs05/ponwrt.git ponwrt
+          echo ">>> PonWrt 源碼已克隆到 ./ponwrt"
+          ls -la ponwrt | head -n 20
+
       - name: 加入外掛來源 (依條件注入 NIKKI + rtp2httpd)
+        working-directory: ./ponwrt
         run: |
           # 防護：feeds.conf.default 不存在時自動建立
           if [ ! -f feeds.conf.default ]; then
@@ -93,13 +100,14 @@ jobs:
       - name: 快取下載套件 (Cache dl)
         uses: actions/cache@v4
         with:
-          path: dl
-          key: ponwrt-dl-an7581-${{ matrix.flavor }}-${{ hashFiles('feeds.conf.default', 'configs/*.config') }}
+          path: ponwrt/dl
+          key: ponwrt-dl-an7581-${{ matrix.flavor }}-${{ hashFiles('ponwrt/feeds.conf.default', 'ponwrt/configs/*.config') }}
           restore-keys: |
             ponwrt-dl-an7581-${{ matrix.flavor }}-
             ponwrt-dl-an7581-
 
       - name: 更新並安裝外掛來源 (Feeds)
+        working-directory: ./ponwrt
         run: |
           ./scripts/feeds update -a
           if [ "${{ matrix.flavor }}" = "with-nikki" ]; then
@@ -117,6 +125,7 @@ jobs:
 
       - name: 預置 Nikki Alpha-Smart 核心並進行 UPX 壓縮 (僅 with-nikki)
         if: matrix.flavor == 'with-nikki'
+        working-directory: ./ponwrt
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -155,6 +164,7 @@ jobs:
           echo ">>> Nikki Alpha-Smart 核心已部署至 files/usr/libexec/mihomo"
 
       - name: 產生並調整韌體設定檔 (鎖定 HG5382A + 核心插件)
+        working-directory: ./ponwrt
         run: |
           perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
 
@@ -222,6 +232,7 @@ jobs:
           fi
 
       - name: 下載原始碼套件 (Download Packages)
+        working-directory: ./ponwrt
         run: |
           export GOPROXY=https://proxy.golang.org,direct
           export GO111MODULE=on
@@ -229,6 +240,7 @@ jobs:
           find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
 
       - name: 執行韌體編譯 (Compile Firmware)
+        working-directory: ./ponwrt
         run: |
           export GOPROXY=https://proxy.golang.org,direct
           export GOSUMDB=sum.golang.org
@@ -243,7 +255,7 @@ jobs:
           mkdir -p ./firmware_out
 
           # 只複製真正的光貓固件與必要元數據
-          find bin/targets/airoha/an7581/ -type f \( \
+          find ponwrt/bin/targets/airoha/an7581/ -type f \( \
             -iname '*hg5382a*.bin' -o \
             -iname '*hg5382a*.ubi' -o \
             -iname '*hg5382a*.itb' -o \
@@ -251,8 +263,8 @@ jobs:
             -name 'profiles.json' \
           \) -exec cp -f {} ./firmware_out/ \;
 
-          UPSTREAM_DATE=$(git log -1 --format='%cd' --date=format:'%Y%m%d' -- . ':!.github' 2>/dev/null || true)
-          [ -z "$UPSTREAM_DATE" ] && UPSTREAM_DATE=$(git log -1 --format='%cd' --date=format:'%Y%m%d')
+          UPSTREAM_DATE=$(cd ponwrt && git log -1 --format='%cd' --date=format:'%Y%m%d' 2>/dev/null || true)
+          [ -z "$UPSTREAM_DATE" ] && UPSTREAM_DATE=$(date +%Y%m%d)
           IMWT_VER="25.2"
           FLAVOR="${{ matrix.flavor }}"
           echo ">>> 上游日期=$UPSTREAM_DATE 版本=$IMWT_VER 標籤=$FLAVOR"
