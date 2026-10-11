@@ -58,19 +58,37 @@ jobs:
             subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
             libzstd-dev jq dos2unix upx-ucl
 
-      - name: 加入外掛來源 (依條件注入 NIKKI)
+      - name: 加入外掛來源 (依條件注入 NIKKI + rtp2httpd)
         run: |
+          # 防護：feeds.conf.default 不存在時自動建立
+          if [ ! -f feeds.conf.default ]; then
+            echo ">>> feeds.conf.default 不存在，正在建立空檔..."
+            touch feeds.conf.default
+          fi
+
+          # 先清除可能殘留的 nikki 源
           sed -i '/nikki/d' feeds.conf.default
+
           if [ "${{ matrix.flavor }}" = "with-nikki" ]; then
             echo ">>> [with-nikki] 正在加入 NIKKI 外掛軟體源..."
-            [ -n "$(tail -c1 feeds.conf.default)" ] && echo "" >> feeds.conf.default
+            [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
             echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
-            dos2unix feeds.conf.default
+            dos2unix feeds.conf.default 2>/dev/null || true
+
+            # 引入 rtp2httpd 完整安裝支援（對齊 ImmortalWrt.yml）
+            echo ">>> 正在引入 rtp2httpd 完整組件..."
+            git clone --depth 1 https://github.com/stackia/rtp2httpd /tmp/rtp2httpd
+            mkdir -p package
+            cp -r /tmp/rtp2httpd/openwrt-support/luci-app-rtp2httpd package/luci-app-rtp2httpd
+            cp -r /tmp/rtp2httpd/openwrt-support/rtp2httpd package/rtp2httpd
+            mv package/rtp2httpd/Makefile.versioned package/rtp2httpd/Makefile
+            mv package/luci-app-rtp2httpd/Makefile.versioned package/luci-app-rtp2httpd/Makefile
           else
-            echo ">>> [no-nikki] 純淨版本，略過 NIKKI 外掛來源注入"
+            echo ">>> [no-nikki] 純淨版本，略過 NIKKI 與 rtp2httpd 注入"
           fi
+
           echo "===== feeds.conf.default 末尾內容 ====="
-          tail -n 5 feeds.conf.default
+          tail -n 5 feeds.conf.default || true
 
       - name: 快取下載套件 (Cache dl)
         uses: actions/cache@v4
@@ -86,11 +104,16 @@ jobs:
           ./scripts/feeds update -a
           if [ "${{ matrix.flavor }}" = "with-nikki" ]; then
             if [ -d feeds/nikki ]; then
-              echo ">>> 正在從 feeds/nikki 中剔除 +yq 相依性（稍後以 CONFIG_PACKAGE_yq 顯式選中）..."
+              echo ">>> 正在從 feeds/nikki 中剔除 +yq 相依性..."
               find feeds/nikki -name Makefile -exec sed -i -E 's/[[:space:]]*\+yq\b//g' {} +
             fi
           fi
           ./scripts/feeds install -a
+
+          # 預設主題改為純淨 Argon（對齊 ImmortalWrt.yml）
+          if [ -f feeds/luci/collections/luci/Makefile ]; then
+            sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile || true
+          fi
 
       - name: 預置 Nikki Alpha-Smart 核心並進行 UPX 壓縮 (僅 with-nikki)
         if: matrix.flavor == 'with-nikki'
@@ -131,7 +154,7 @@ jobs:
           chmod +x files/usr/libexec/mihomo
           echo ">>> Nikki Alpha-Smart 核心已部署至 files/usr/libexec/mihomo"
 
-      - name: 產生並調整韌體設定檔 (鎖定 HG5382A 與外掛)
+      - name: 產生並調整韌體設定檔 (鎖定 HG5382A + 核心插件)
         run: |
           perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
 
@@ -140,33 +163,34 @@ jobs:
           sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
           sed -i '/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
 
+          # 公共核心插件 + 主題 Argon（完全對齊 ImmortalWrt.yml 精簡風格）
           cat >> .config << 'EOF'
           # CONFIG_TARGET_ALL_PROFILES is not set
           # CONFIG_TARGET_MULTI_PROFILE is not set
           CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5382a=y
           CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5382a=y
 
-          # === 雙版本共用外掛 1: TTYD 網頁終端機（完整） ===
-          CONFIG_PACKAGE_ttyd=y
+          # === 主題 Argon（僅核心） ===
+          CONFIG_PACKAGE_luci-theme-argon=y
+          # CONFIG_PACKAGE_luci-theme-bootstrap is not set
+
+          # === 公共插件 1: TTYD（僅核心） ===
           CONFIG_PACKAGE_luci-app-ttyd=y
-          CONFIG_PACKAGE_luci-i18n-ttyd-zh-cn=y
 
-          # === 雙版本共用外掛 2: DDNS 動態網域名稱（完整） ===
-          CONFIG_PACKAGE_ddns-scripts=y
-          CONFIG_PACKAGE_ddns-scripts-services=y
+          # === 公共插件 2: DDNS（僅核心） ===
           CONFIG_PACKAGE_luci-app-ddns=y
-          CONFIG_PACKAGE_luci-i18n-ddns-zh-cn=y
-          CONFIG_PACKAGE_curl=y
-          CONFIG_PACKAGE_ca-bundle=y
+          CONFIG_PACKAGE_ddns-scripts=y
 
-          # === 雙版本共用外掛 3: OpenSSH SFTP 伺服器（完整） ===
+          # === 公共插件 3: OpenSSH SFTP（僅核心） ===
           CONFIG_PACKAGE_openssh-sftp-server=y
           EOF
 
           if [ "${{ matrix.flavor }}" = "with-nikki" ]; then
-            echo ">>> [with-nikki] 注入 NIKKI 核心組件 + 啟用 files/ 覆蓋"
+            echo ">>> [with-nikki] 注入 NIKKI 核心 + rtp2httpd 完整組件 + files/ 覆蓋"
             cat >> .config << 'EOF'
           CONFIG_TARGET_ROOTFS_INCLUDE_FILES=y
+
+          # Nikki 核心（預置二進位 + LuCI）
           CONFIG_PACKAGE_luci-app-nikki=y
           CONFIG_PACKAGE_luci-i18n-nikki-zh-cn=y
           CONFIG_PACKAGE_kmod-nft-tproxy=y
@@ -176,12 +200,17 @@ jobs:
           CONFIG_PACKAGE_kmod-dummy=y
           CONFIG_PACKAGE_ip-full=y
           CONFIG_PACKAGE_yq=y
+
+          # rtp2httpd 完整組件（對齊 ImmortalWrt.yml）
+          CONFIG_PACKAGE_rtp2httpd=y
+          CONFIG_PACKAGE_luci-app-rtp2httpd=y
+          CONFIG_PACKAGE_luci-i18n-rtp2httpd-zh-cn=y
           EOF
           else
-            echo ">>> [no-nikki] 顯式關閉 NIKKI"
+            echo ">>> [no-nikki] 顯式關閉 NIKKI 與 rtp2httpd"
             echo "# CONFIG_PACKAGE_luci-app-nikki is not set" >> .config
-            echo "# CONFIG_PACKAGE_mihomo-meta is not set" >> .config
-            echo "# CONFIG_PACKAGE_nikki is not set" >> .config
+            echo "# CONFIG_PACKAGE_rtp2httpd is not set" >> .config
+            echo "# CONFIG_PACKAGE_luci-app-rtp2httpd is not set" >> .config
           fi
 
           make defconfig
@@ -332,25 +361,25 @@ jobs:
 
             ---
 
-            #### 包含 NIKKI 代理版（檔名含 `with-nikki`）
+            #### 公共核心組件（兩個版本均包含）
             | 類型 | 套件 | 說明 |
             |------|------|------|
-            | 終端 | `ttyd` + `luci-app-ttyd` + 簡中 | 網頁終端機（完整） |
-            | DDNS | `ddns-scripts` + `luci-app-ddns` + 簡中 | 動態網域（完整） |
-            | 檔案 | `openssh-sftp-server` | WinSCP / FileZilla（完整） |
+            | 主題 | `luci-theme-argon` | 純淨 Argon 主題（僅核心） |
+            | 終端 | `luci-app-ttyd` | 網頁終端機（僅核心） |
+            | DDNS | `luci-app-ddns` + `ddns-scripts` | 動態網域（僅核心） |
+            | 檔案 | `openssh-sftp-server` | SFTP 伺服器（僅核心） |
+
+            #### 包含 NIKKI + rtp2httpd 進階版（檔名含 `with-nikki`）
+            | 類型 | 套件 | 說明 |
+            |------|------|------|
             | 代理核心 | **預置 Alpha-Smart + UPX -9** | 放置於 `/usr/libexec/mihomo` |
             | 代理插件 | `luci-app-nikki` + 簡中 | 透明代理管理界面 |
             | 核心模組 | `kmod-nft-tproxy` `kmod-tun` `kmod-inet-diag` `kmod-nft-socket` `kmod-dummy` | TProxy / TUN |
             | 工具 | `ip-full` `yq` | 完整 ip 命令與配置處理 |
+            | IPTV | `rtp2httpd` + `luci-app-rtp2httpd` + 簡中 | 完整 IPTV 串流轉換服務（完整組件） |
 
             #### 純淨輕量版（檔名含 `no-nikki`）
-            | 類型 | 套件 | 說明 |
-            |------|------|------|
-            | 終端 | `ttyd` + `luci-app-ttyd` + 簡中 | 網頁終端機（完整） |
-            | DDNS | `ddns-scripts` + `luci-app-ddns` + 簡中 | 動態網域（完整） |
-            | 檔案 | `openssh-sftp-server` | WinSCP / FileZilla（完整） |
-
-            純淨版**完全不含** nikki / mihomo / yq / TProxy / TUN 相關組件。
+            僅包含上方「公共核心組件」，**完全不含** nikki / mihomo / rtp2httpd / yq / TProxy / TUN 相關組件。
 
             ---
 
